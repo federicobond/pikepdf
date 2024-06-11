@@ -107,7 +107,7 @@ skip = [
   "pp*-manylinux*_aarch64", # not supported by Pillow yet
 ]
 test-skip = "*_universal2:arm64"
-build-frontend = "build"
+build-frontend = "build[uv]"
 
 [tool.cibuildwheel.environment]
 QPDF_MIN_VERSION = "11.5.0"
