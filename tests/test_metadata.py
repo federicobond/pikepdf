@@ -23,7 +23,7 @@ from pikepdf.models.metadata import (
     XMP_NS_PDF,
     XMP_NS_XMP,
     DateConverter,
-    PdfMetadata,
+    XmpMetadata,
     decode_pdf_date,
 )
 
@@ -78,9 +78,10 @@ def invalid_creationdate(resources):
 
 def test_lowlevel(sandwich):
     meta = sandwich.open_metadata()
-    assert meta._qname('pdf:Producer') == '{http://ns.adobe.com/pdf/1.3/}Producer'
+    meta._load()
+    assert meta._xmp._qname('pdf:Producer') == '{http://ns.adobe.com/pdf/1.3/}Producer'
     assert (
-        meta._prefix_from_uri('{http://ns.adobe.com/pdf/1.3/}Producer')
+        meta._xmp._prefix_from_uri('{http://ns.adobe.com/pdf/1.3/}Producer')
         == 'pdf:Producer'
     )
     assert 'pdf:Producer' in meta
@@ -449,10 +450,10 @@ def test_no_x_xmpmeta(trivial):
     """.strip(),
     )
 
-    with trivial.open_metadata() as xmp:
-        assert xmp._get_rdf_root() is not None
-        xmp['pdfaid:part'] = '2'
-    assert xmp['pdfaid:part'] == '2'
+    with trivial.open_metadata() as meta:
+        assert meta._xmp._get_rdf_root() is not None
+        meta['pdfaid:part'] = '2'
+    assert meta['pdfaid:part'] == '2'
 
 
 @pytest.mark.parametrize(
@@ -678,8 +679,11 @@ def test_issue_135_title_rdf_bag(trivial):
         pytest.warns(UserWarning, match="Merging elements"),
     ):
         xmp['dc:title'] = {'Title 1', 'Title 2'}
-    with trivial.open_metadata(update_docinfo=False) as xmp:
-        assert b'Title 1; Title 2</rdf:li></rdf:Alt></dc:title>' in xmp._get_xml_bytes()
+    with trivial.open_metadata(update_docinfo=False) as meta:
+        assert (
+            b'Title 1; Title 2</rdf:li></rdf:Alt></dc:title>'
+            in meta._xmp._get_xml_bytes()
+        )
 
 
 def test_xmp_metadatadate_timezone(sandwich, outpdf):
@@ -736,13 +740,13 @@ def test_xxe(trivial, outdir):
 
 
 def test_qname_no_namespace():
-    assert PdfMetadata._qname('abc') == 'abc'
+    assert XmpMetadata._qname('abc') == 'abc'
 
 
 def test_register_xmlns():
-    PdfMetadata.register_xml_namespace('http://github.com/pikepdf/pikepdf/', 'pikepdf')
+    XmpMetadata.register_xml_namespace('http://github.com/pikepdf/pikepdf/', 'pikepdf')
     assert (
-        PdfMetadata._qname('pikepdf:foo') == '{http://github.com/pikepdf/pikepdf/}foo'
+        XmpMetadata._qname('pikepdf:foo') == '{http://github.com/pikepdf/pikepdf/}foo'
     )
 
 
