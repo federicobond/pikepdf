@@ -505,7 +505,7 @@ class PdfMetadata(MutableMapping):
                 'pikepdf ' + pikepdf_version,
                 applying_mark=True,
             )
-        xml = self._xmp._get_xml_bytes()
+        xml = self._xmp.get_xml_bytes()
         self._pdf.Root.Metadata = Stream(self._pdf, xml)
         self._pdf.Root.Metadata[Name.Type] = Name.Metadata
         self._pdf.Root.Metadata[Name.Subtype] = Name.XML
@@ -943,7 +943,8 @@ class XmpMetadata[MutableMapping]:
         except StopIteration:
             raise KeyError(key) from None
 
-    def _get_xml_bytes(self, xpacket=True):
+    def get_xml_bytes(self, xpacket=True):
+        """Convert XMP metadata to XML bytes."""
         data = BytesIO()
         if xpacket:
             data.write(XPACKET_BEGIN)
@@ -956,4 +957,4 @@ class XmpMetadata[MutableMapping]:
 
     def __str__(self):
         """Convert XMP metadata to XML string."""
-        return self._get_xml_bytes(xpacket=False).decode('utf-8')
+        return self.get_xml_bytes(xpacket=False).decode('utf-8')

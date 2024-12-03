@@ -682,7 +682,7 @@ def test_issue_135_title_rdf_bag(trivial):
     with trivial.open_metadata(update_docinfo=False) as meta:
         assert (
             b'Title 1; Title 2</rdf:li></rdf:Alt></dc:title>'
-            in meta._xmp._get_xml_bytes()
+            in meta._xmp.get_xml_bytes()
         )
 
 
