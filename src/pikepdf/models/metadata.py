@@ -405,7 +405,7 @@ class PdfMetadata(MutableMapping):
                     val = converter.xmp_from_docinfo(val)
                 if not val:
                     continue
-                self._xmp._setitem(qname, val, True)
+                self._xmp.setitem(qname, val, True)
             except (ValueError, AttributeError, NotImplementedError) as e:
                 warn_or_raise(
                     f"The metadata field {docinfo_name} could not be copied to XMP", e
@@ -495,12 +495,12 @@ class PdfMetadata(MutableMapping):
         """
         if self.mark:
             # We were asked to mark the file as being edited by pikepdf
-            self._xmp._setitem(
+            self._xmp.setitem(
                 QName(XMP_NS_XMP, 'MetadataDate'),
                 datetime.now(timezone.utc).isoformat(),
                 applying_mark=True,
             )
-            self._xmp._setitem(
+            self._xmp.setitem(
                 QName(XMP_NS_PDF, 'Producer'),
                 'pikepdf ' + pikepdf_version,
                 applying_mark=True,
@@ -816,12 +816,13 @@ class XmpMetadata[MutableMapping]:
         """Return number of items in metadata."""
         return len(list(iter(self)))
 
-    def _setitem(
+    def setitem(
         self,
         key: str | QName,
         val: set[str] | list[str] | str,
         applying_mark: bool = False,
     ):
+        """Set XMP metadata key to value."""
         qkey = self._qname(key)
         self._setitem_check_args(key, val, applying_mark, qkey)
 
@@ -923,7 +924,7 @@ class XmpMetadata[MutableMapping]:
 
     def __setitem__(self, key: str | QName, val: set[str] | list[str] | str):
         """Set XMP metadata key to value."""
-        return self._setitem(key, val, False)
+        return self.setitem(key, val, False)
 
     def __delitem__(self, key: str | QName):
         """Delete item from XMP metadata."""
