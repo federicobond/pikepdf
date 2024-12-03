@@ -353,29 +353,6 @@ class PdfMetadata(MutableMapping):
         DocinfoMapping(XMP_NS_XMP, 'ModifyDate', Name.ModDate, DateConverter),
     ]
 
-    NS: dict[str, str] = {prefix: uri for uri, prefix in DEFAULT_NAMESPACES}
-    REVERSE_NS: dict[str, str] = dict(DEFAULT_NAMESPACES)
-
-    _PARSERS_OVERWRITE_INVALID_XML: Iterable[Callable[[bytes], Any]] = [
-        _parser_basic,
-        _parser_strip_illegal_bytes,
-        _parser_recovery,
-        _parser_replace_with_empty_xmp,
-    ]
-    _PARSERS_STANDARD: Iterable[Callable[[bytes], Any]] = [_parser_basic]
-
-    @classmethod
-    def register_xml_namespace(cls, uri, prefix):
-        """Register a new XML/XMP namespace.
-
-        Arguments:
-            uri: The long form of the namespace.
-            prefix: The alias to use when interpreting XMP.
-        """
-        cls.NS[prefix] = uri
-        cls.REVERSE_NS[uri] = prefix
-        etree.register_namespace(_prefix, _uri)
-
     def __init__(
         self,
         pdf: Pdf,
@@ -428,7 +405,7 @@ class PdfMetadata(MutableMapping):
                     val = converter.xmp_from_docinfo(val)
                 if not val:
                     continue
-                self._setitem(qname, val, True)
+                self._xmp._setitem(qname, val, True)
             except (ValueError, AttributeError, NotImplementedError) as e:
                 warn_or_raise(
                     f"The metadata field {docinfo_name} could not be copied to XMP", e
@@ -448,48 +425,11 @@ class PdfMetadata(MutableMapping):
             data = self._pdf.Root.Metadata.read_bytes()
         except AttributeError:
             data = b''
-        self._load_from(data)
-
-    def _load_from(self, data: bytes) -> None:
-        if data.strip() == b'':
-            data = XMP_EMPTY  # on some platforms lxml chokes on empty documents
-
-        parsers = (
-            self._PARSERS_OVERWRITE_INVALID_XML
-            if self.overwrite_invalid_xml
-            else self._PARSERS_STANDARD
+        self._xmp = XmpMetadata(
+            data,
+            mark=self.mark,
+            overwrite_invalid_xml=self.overwrite_invalid_xml,
         )
-
-        for parser in parsers:
-            try:
-                self._xmp = parser(data)
-            except (
-                XMLSyntaxError if self.overwrite_invalid_xml else NeverRaise  # type: ignore
-            ) as e:
-                if str(e).startswith("Start tag expected, '<' not found") or str(
-                    e
-                ).startswith("Document is empty"):
-                    self._xmp = _parser_replace_with_empty_xmp()
-                    break
-            else:
-                break
-
-        if self._xmp is not None:
-            try:
-                pis = self._xmp.xpath('/processing-instruction()')
-                for pi in pis:
-                    etree.strip_tags(self._xmp, pi.tag)
-                self._get_rdf_root()
-            except (
-                Exception  # pylint: disable=broad-except
-                if self.overwrite_invalid_xml
-                else NeverRaise
-            ) as e:
-                log.warning("Error occurred parsing XMP", exc_info=e)
-                self._xmp = _parser_replace_with_empty_xmp()
-        else:
-            log.warning("Error occurred parsing XMP")
-            self._xmp = _parser_replace_with_empty_xmp()
 
     @ensure_loaded
     def __enter__(self):
@@ -548,17 +488,6 @@ class PdfMetadata(MutableMapping):
                 # qpdf will serialize this as a UTF-16 with BOM string
                 self._pdf.docinfo[docinfo_name] = value
 
-    def _get_xml_bytes(self, xpacket=True):
-        data = BytesIO()
-        if xpacket:
-            data.write(XPACKET_BEGIN)
-        self._xmp.write(data, encoding='utf-8', pretty_print=True)
-        if xpacket:
-            data.write(XPACKET_END)
-        data.seek(0)
-        xml_bytes = data.read()
-        return xml_bytes
-
     def _apply_changes(self):
         """Serialize our changes back to the PDF in memory.
 
@@ -566,22 +495,186 @@ class PdfMetadata(MutableMapping):
         """
         if self.mark:
             # We were asked to mark the file as being edited by pikepdf
-            self._setitem(
+            self._xmp._setitem(
                 QName(XMP_NS_XMP, 'MetadataDate'),
                 datetime.now(timezone.utc).isoformat(),
                 applying_mark=True,
             )
-            self._setitem(
+            self._xmp._setitem(
                 QName(XMP_NS_PDF, 'Producer'),
                 'pikepdf ' + pikepdf_version,
                 applying_mark=True,
             )
-        xml = self._get_xml_bytes()
+        xml = self._xmp._get_xml_bytes()
         self._pdf.Root.Metadata = Stream(self._pdf, xml)
         self._pdf.Root.Metadata[Name.Type] = Name.Metadata
         self._pdf.Root.Metadata[Name.Subtype] = Name.XML
         if self.sync_docinfo:
             self._update_docinfo()
+
+    @ensure_loaded
+    def __contains__(self, key: str | QName):
+        """Test if XMP key is in metadata."""
+        return key in self._xmp
+
+    @ensure_loaded
+    def __getitem__(self, key: str | QName):
+        """Retrieve XMP metadata for key."""
+        return self._xmp[key]
+
+    @ensure_loaded
+    def __iter__(self):
+        """Iterate through XMP metadata attributes and nodes."""
+        return iter(self._xmp)
+
+    @ensure_loaded
+    def __len__(self):
+        """Return number of items in metadata."""
+        return len(self._xmp)
+
+    @ensure_loaded
+    def __setitem__(self, key: str | QName, val: set[str] | list[str] | str):
+        """Set XMP metadata key to value."""
+        if not self._updating:
+            raise RuntimeError("Metadata not opened for editing, use with block")
+        self._xmp[key] = val
+
+    @ensure_loaded
+    def __delitem__(self, key: str | QName):
+        """Delete item from XMP metadata."""
+        if not self._updating:
+            raise RuntimeError("Metadata not opened for editing, use with block")
+        del self._xmp[key]
+
+    @property
+    def pdfa_status(self) -> str:
+        """Return the PDF/A conformance level claimed by this PDF, or False.
+
+        A PDF may claim to PDF/A compliant without this being true. Use an
+        independent verifier such as veraPDF to test if a PDF is truly
+        conformant.
+
+        Returns:
+            The conformance level of the PDF/A, or an empty string if the
+            PDF does not claim PDF/A conformance. Possible valid values
+            are: 1A, 1B, 2A, 2B, 2U, 3A, 3B, 3U.
+        """
+        # do same as @ensure_loaded - mypy can't handle decorated property
+        if not self._xmp:
+            self._load()
+
+        key_part = QName(XMP_NS_PDFA_ID, 'part')
+        key_conformance = QName(XMP_NS_PDFA_ID, 'conformance')
+        try:
+            return self[key_part] + self[key_conformance]
+        except KeyError:
+            return ''
+
+    @property
+    def pdfx_status(self) -> str:
+        """Return the PDF/X conformance level claimed by this PDF, or False.
+
+        A PDF may claim to PDF/X compliant without this being true. Use an
+        independent verifier such as veraPDF to test if a PDF is truly
+        conformant.
+
+        Returns:
+            The conformance level of the PDF/X, or an empty string if the
+            PDF does not claim PDF/X conformance.
+        """
+        # do same as @ensure_loaded - mypy can't handle decorated property
+        if not self._xmp:
+            self._load()
+
+        pdfx_version = QName(XMP_NS_PDFX_ID, 'GTS_PDFXVersion')
+        try:
+            return self[pdfx_version]
+        except KeyError:
+            return ''
+
+    @ensure_loaded
+    def __str__(self):
+        """Convert XMP metadata to XML string."""
+        return str(self._xmp)
+
+
+class XmpMetadata[MutableMapping]:
+    """Read and edit XMP metadata."""
+
+    NS: dict[str, str] = {prefix: uri for uri, prefix in DEFAULT_NAMESPACES}
+    REVERSE_NS: dict[str, str] = dict(DEFAULT_NAMESPACES)
+
+    _PARSERS_OVERWRITE_INVALID_XML: Iterable[Callable[[bytes], Any]] = [
+        _parser_basic,
+        _parser_strip_illegal_bytes,
+        _parser_recovery,
+        _parser_replace_with_empty_xmp,
+    ]
+    _PARSERS_STANDARD: Iterable[Callable[[bytes], Any]] = [_parser_basic]
+
+    @classmethod
+    def register_xml_namespace(cls, uri, prefix):
+        """Register a new XML/XMP namespace.
+
+        Arguments:
+            uri: The long form of the namespace.
+            prefix: The alias to use when interpreting XMP.
+        """
+        cls.NS[prefix] = uri
+        cls.REVERSE_NS[uri] = prefix
+        etree.register_namespace(_prefix, _uri)
+
+    def __init__(
+        self,
+        data: bytes,
+        mark: bool = True,
+        overwrite_invalid_xml: bool = True,
+    ):
+        """Load XMP metadata from a byte string."""
+        self.mark = mark
+        self.overwrite_invalid_xml = overwrite_invalid_xml
+        self._load_from(data)
+
+    def _load_from(self, data: bytes) -> None:
+        if data.strip() == b'':
+            data = XMP_EMPTY  # on some platforms lxml chokes on empty documents
+
+        parsers = (
+            self._PARSERS_OVERWRITE_INVALID_XML
+            if self.overwrite_invalid_xml
+            else self._PARSERS_STANDARD
+        )
+
+        for parser in parsers:
+            try:
+                self._xmp = parser(data)
+            except (
+                XMLSyntaxError if self.overwrite_invalid_xml else NeverRaise  # type: ignore
+            ) as e:
+                if str(e).startswith("Start tag expected, '<' not found") or str(
+                    e
+                ).startswith("Document is empty"):
+                    self._xmp = _parser_replace_with_empty_xmp()
+                    break
+            else:
+                break
+
+        if self._xmp is not None:
+            try:
+                pis = self._xmp.xpath('/processing-instruction()')
+                for pi in pis:
+                    etree.strip_tags(self._xmp, pi.tag)
+                self._get_rdf_root()
+            except (
+                Exception  # pylint: disable=broad-except
+                if self.overwrite_invalid_xml
+                else NeverRaise
+            ) as e:
+                log.warning("Error occurred parsing XMP", exc_info=e)
+                self._xmp = _parser_replace_with_empty_xmp()
+        else:
+            log.warning("Error occurred parsing XMP")
+            self._xmp = _parser_replace_with_empty_xmp()
 
     @classmethod
     def _qname(cls, name: QName | str) -> str:
@@ -700,12 +793,10 @@ class PdfMetadata(MutableMapping):
     def _get_element_values(self, name: str | QName = '') -> Iterator[Any]:
         yield from (v[2] for v in self._get_elements(name))
 
-    @ensure_loaded
     def __contains__(self, key: str | QName):
         """Test if XMP key is in metadata."""
         return any(self._get_element_values(key))
 
-    @ensure_loaded
     def __getitem__(self, key: str | QName):
         """Retrieve XMP metadata for key."""
         try:
@@ -713,7 +804,6 @@ class PdfMetadata(MutableMapping):
         except StopIteration:
             raise KeyError(key) from None
 
-    @ensure_loaded
     def __iter__(self):
         """Iterate through XMP metadata attributes and nodes."""
         for node, attrib, _val, _parents in self._get_elements():
@@ -722,7 +812,6 @@ class PdfMetadata(MutableMapping):
             else:
                 yield node.tag
 
-    @ensure_loaded
     def __len__(self):
         """Return number of items in metadata."""
         return len(list(iter(self)))
@@ -733,9 +822,6 @@ class PdfMetadata(MutableMapping):
         val: set[str] | list[str] | str,
         applying_mark: bool = False,
     ):
-        if not self._updating:
-            raise RuntimeError("Metadata not opened for editing, use with block")
-
         qkey = self._qname(key)
         self._setitem_check_args(key, val, applying_mark, qkey)
 
@@ -835,16 +921,12 @@ class PdfMetadata(MutableMapping):
         else:
             raise TypeError(f"Setting {key} to {val} with type {type(val)}") from None
 
-    @ensure_loaded
     def __setitem__(self, key: str | QName, val: set[str] | list[str] | str):
         """Set XMP metadata key to value."""
         return self._setitem(key, val, False)
 
-    @ensure_loaded
     def __delitem__(self, key: str | QName):
         """Delete item from XMP metadata."""
-        if not self._updating:
-            raise RuntimeError("Metadata not opened for editing, use with block")
         try:
             node, attrib, _oldval, parent = next(self._get_elements(key))
             if attrib:  # Inline
@@ -861,53 +943,17 @@ class PdfMetadata(MutableMapping):
         except StopIteration:
             raise KeyError(key) from None
 
-    @property
-    def pdfa_status(self) -> str:
-        """Return the PDF/A conformance level claimed by this PDF, or False.
+    def _get_xml_bytes(self, xpacket=True):
+        data = BytesIO()
+        if xpacket:
+            data.write(XPACKET_BEGIN)
+        self._xmp.write(data, encoding='utf-8', pretty_print=True)
+        if xpacket:
+            data.write(XPACKET_END)
+        data.seek(0)
+        xml_bytes = data.read()
+        return xml_bytes
 
-        A PDF may claim to PDF/A compliant without this being true. Use an
-        independent verifier such as veraPDF to test if a PDF is truly
-        conformant.
-
-        Returns:
-            The conformance level of the PDF/A, or an empty string if the
-            PDF does not claim PDF/A conformance. Possible valid values
-            are: 1A, 1B, 2A, 2B, 2U, 3A, 3B, 3U.
-        """
-        # do same as @ensure_loaded - mypy can't handle decorated property
-        if not self._xmp:
-            self._load()
-
-        key_part = QName(XMP_NS_PDFA_ID, 'part')
-        key_conformance = QName(XMP_NS_PDFA_ID, 'conformance')
-        try:
-            return self[key_part] + self[key_conformance]
-        except KeyError:
-            return ''
-
-    @property
-    def pdfx_status(self) -> str:
-        """Return the PDF/X conformance level claimed by this PDF, or False.
-
-        A PDF may claim to PDF/X compliant without this being true. Use an
-        independent verifier such as veraPDF to test if a PDF is truly
-        conformant.
-
-        Returns:
-            The conformance level of the PDF/X, or an empty string if the
-            PDF does not claim PDF/X conformance.
-        """
-        # do same as @ensure_loaded - mypy can't handle decorated property
-        if not self._xmp:
-            self._load()
-
-        pdfx_version = QName(XMP_NS_PDFX_ID, 'GTS_PDFXVersion')
-        try:
-            return self[pdfx_version]
-        except KeyError:
-            return ''
-
-    @ensure_loaded
     def __str__(self):
         """Convert XMP metadata to XML string."""
         return self._get_xml_bytes(xpacket=False).decode('utf-8')
